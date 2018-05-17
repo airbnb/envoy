@@ -95,6 +95,10 @@ message HealthCheck {
     repeated Payload receive = 2;
   }
 
+  message MultiRoundTripTcpHealthCheck {
+    repeated TcpHealthCheck round_trip = 1;
+  }
+
   message RedisHealthCheck {
     // If set, optionally perform ``EXISTS <key>`` instead of ``PING``. A return value
     // from Redis of 0 (does not exist) is considered a passing healthcheck. A return value other
@@ -134,6 +138,9 @@ message HealthCheck {
 
     // TCP health check.
     TcpHealthCheck tcp_health_check = 9;
+
+    // Multi Round Trip TCP health check
+    MultiRoundTripTcpHealthCheck multi_round_trip_tcp_health_check = 17;
 
     // Redis health check.
     RedisHealthCheck redis_health_check = 10;

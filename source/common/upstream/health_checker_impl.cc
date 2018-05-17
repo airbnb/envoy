@@ -46,6 +46,7 @@ HealthCheckerFactory::create(const envoy::api::v2::core::HealthCheck& hc_config,
     return std::make_shared<ProdHttpHealthCheckerImpl>(cluster, hc_config, dispatcher, runtime,
                                                        random);
   case envoy::api::v2::core::HealthCheck::HealthCheckerCase::kTcpHealthCheck:
+  case envoy::api::v2::core::HealthCheck::HealthCheckerCase::kMultiRoundTripTcpHealthCheck:
     return std::make_shared<TcpHealthCheckerImpl>(cluster, hc_config, dispatcher, runtime, random);
   case envoy::api::v2::core::HealthCheck::HealthCheckerCase::kGrpcHealthCheck:
     if (!(cluster.info()->features() & Upstream::ClusterInfo::Features::HTTP2)) {
@@ -212,6 +213,12 @@ ProdHttpHealthCheckerImpl::createCodecClient(Upstream::Host::CreateConnectionDat
                                    data.host_description_, dispatcher_);
 }
 
+TcpHealthCheckMatcher::MatchSegments TcpHealthCheckMatcher::loadProtoBytes(const envoy::api::v2::core::HealthCheck::Payload& byte_array) {
+  MatchSegments result;
+  result.push_back(Hex::decode(byte_array.text()));
+  return result;
+}
+
 TcpHealthCheckMatcher::MatchSegments TcpHealthCheckMatcher::loadProtoBytes(
     const Protobuf::RepeatedPtrField<envoy::api::v2::core::HealthCheck::Payload>& byte_array) {
   MatchSegments result;
@@ -238,18 +245,31 @@ bool TcpHealthCheckMatcher::match(const MatchSegments& expected, const Buffer::I
   return true;
 }
 
+
 TcpHealthCheckerImpl::TcpHealthCheckerImpl(const Cluster& cluster,
                                            const envoy::api::v2::core::HealthCheck& config,
                                            Event::Dispatcher& dispatcher, Runtime::Loader& runtime,
                                            Runtime::RandomGenerator& random)
-    : HealthCheckerImplBase(cluster, config, dispatcher, runtime, random), send_bytes_([&config] {
-        Protobuf::RepeatedPtrField<envoy::api::v2::core::HealthCheck::Payload> send_repeated;
-        if (!config.tcp_health_check().send().text().empty()) {
-          send_repeated.Add()->CopyFrom(config.tcp_health_check().send());
+    : HealthCheckerImplBase(cluster, config, dispatcher, runtime, random),
+      payload_([&config] {
+        RoundTripPayloads payload;
+        if (config.has_multi_round_trip_tcp_health_check()) {
+          for (const auto& entry: config.multi_round_trip_tcp_health_check().round_trip()) {
+            if (entry.send().text().empty()) { continue; }
+            payload.emplace_back(
+              TcpHealthCheckMatcher::loadProtoBytes(entry.send()),
+              TcpHealthCheckMatcher::loadProtoBytes(entry.receive())
+            );
+          }
+        } else if (!config.tcp_health_check().send().text().empty()) {
+          payload.emplace_back(
+            TcpHealthCheckMatcher::loadProtoBytes(config.tcp_health_check().send()),
+            TcpHealthCheckMatcher::loadProtoBytes(config.tcp_health_check().receive())
+          );
         }
-        return TcpHealthCheckMatcher::loadProtoBytes(send_repeated);
-      }()),
-      receive_bytes_(TcpHealthCheckMatcher::loadProtoBytes(config.tcp_health_check().receive())) {}
+        return payload;
+      }())
+  {}
 
 TcpHealthCheckerImpl::TcpActiveHealthCheckSession::~TcpActiveHealthCheckSession() {
   if (client_) {
@@ -259,12 +279,22 @@ TcpHealthCheckerImpl::TcpActiveHealthCheckSession::~TcpActiveHealthCheckSession(
 
 void TcpHealthCheckerImpl::TcpActiveHealthCheckSession::onData(Buffer::Instance& data) {
   ENVOY_CONN_LOG(trace, "total pending buffer={}", *client_, data.length());
-  if (TcpHealthCheckMatcher::match(parent_.receive_bytes_, data)) {
-    ENVOY_CONN_LOG(trace, "healthcheck passed", *client_);
+  if (TcpHealthCheckMatcher::match(round_trip_->receive_bytes, data)) {
     data.drain(data.length());
-    handleSuccess();
-    if (!parent_.reuse_connection_) {
-      client_->close(Network::ConnectionCloseType::NoFlush);
+    if (++round_trip_ == parent_.payload_.end()) {
+      ENVOY_CONN_LOG(trace, "healthcheck passed", *client_);
+      handleSuccess();
+      if (!parent_.reuse_connection_) {
+        client_->close(Network::ConnectionCloseType::NoFlush);
+      }
+    } else {
+      ENVOY_CONN_LOG(trace, "healthcheck round trip advanced", *client_);
+      Buffer::OwnedImpl data;
+      for (const std::vector<uint8_t>& segment : round_trip_->send_bytes) {
+        data.add(&segment[0], segment.size());
+      }
+
+      client_->write(data, false);
     }
   }
 }
@@ -279,7 +309,7 @@ void TcpHealthCheckerImpl::TcpActiveHealthCheckSession::onEvent(Network::Connect
     parent_.dispatcher_.deferredDelete(std::move(client_));
   }
 
-  if (event == Network::ConnectionEvent::Connected && parent_.receive_bytes_.empty()) {
+  if (event == Network::ConnectionEvent::Connected && parent_.payload_.empty()) {
     // In this case we are just testing that we can connect, so immediately succeed. Also, since
     // we are just doing a connection test, close the connection.
     // NOTE(mattklein123): I've seen cases where the kernel will report a successful connection, and
@@ -310,9 +340,9 @@ void TcpHealthCheckerImpl::TcpActiveHealthCheckSession::onInterval() {
     client_->noDelay(true);
   }
 
-  if (!parent_.send_bytes_.empty()) {
+  if (round_trip_ != parent_.payload_.end()) {
     Buffer::OwnedImpl data;
-    for (const std::vector<uint8_t>& segment : parent_.send_bytes_) {
+    for (const std::vector<uint8_t>& segment : round_trip_->send_bytes) {
       data.add(&segment[0], segment.size());
     }
 

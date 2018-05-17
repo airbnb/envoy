@@ -170,6 +170,7 @@ class TcpHealthCheckMatcher {
 public:
   typedef std::list<std::vector<uint8_t>> MatchSegments;
 
+  static MatchSegments loadProtoBytes(const envoy::api::v2::core::HealthCheck::Payload& byte_array);
   static MatchSegments loadProtoBytes(
       const Protobuf::RepeatedPtrField<envoy::api::v2::core::HealthCheck::Payload>& byte_array);
   static bool match(const MatchSegments& expected, const Buffer::Instance& buffer);
@@ -185,6 +186,15 @@ public:
                        Runtime::RandomGenerator& random);
 
 private:
+  struct RoundTripPayload {
+    RoundTripPayload(TcpHealthCheckMatcher::MatchSegments send_bytes, TcpHealthCheckMatcher::MatchSegments receive_bytes): send_bytes(std::move(send_bytes)), receive_bytes(std::move(receive_bytes)) {}
+
+    const TcpHealthCheckMatcher::MatchSegments send_bytes;
+    const TcpHealthCheckMatcher::MatchSegments receive_bytes;
+  };
+
+  typedef std::list<RoundTripPayload> RoundTripPayloads;
+
   struct TcpActiveHealthCheckSession;
 
   struct TcpSessionCallbacks : public Network::ConnectionCallbacks,
@@ -207,7 +217,7 @@ private:
 
   struct TcpActiveHealthCheckSession : public ActiveHealthCheckSession {
     TcpActiveHealthCheckSession(TcpHealthCheckerImpl& parent, const HostSharedPtr& host)
-        : ActiveHealthCheckSession(parent, host), parent_(parent) {}
+        : ActiveHealthCheckSession(parent, host), parent_(parent), round_trip_(parent_.payload_.begin()) {}
     ~TcpActiveHealthCheckSession();
 
     void onData(Buffer::Instance& data);
@@ -220,6 +230,7 @@ private:
     TcpHealthCheckerImpl& parent_;
     Network::ClientConnectionPtr client_;
     std::shared_ptr<TcpSessionCallbacks> session_callbacks_;
+    RoundTripPayloads::const_iterator round_trip_;
   };
 
   typedef std::unique_ptr<TcpActiveHealthCheckSession> TcpActiveHealthCheckSessionPtr;
@@ -229,8 +240,7 @@ private:
     return std::make_unique<TcpActiveHealthCheckSession>(*this, host);
   }
 
-  const TcpHealthCheckMatcher::MatchSegments send_bytes_;
-  const TcpHealthCheckMatcher::MatchSegments receive_bytes_;
+  const RoundTripPayloads payload_;
 };
 
 /**
