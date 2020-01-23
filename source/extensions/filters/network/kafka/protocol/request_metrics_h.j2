@@ -15,8 +15,14 @@
 #include <array>
 #include <functional>
 
+#include "common/common/regex.h"
+#include "common/runtime/runtime_impl.h"
+#include "common/stats/symbol_table_impl.h"
+
 #include "envoy/stats/scope.h"
 #include "envoy/stats/stats_macros.h"
+
+#include "extensions/filters/network/kafka/kafka_types.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -48,7 +54,7 @@ public:
   /**
    * Invoked when properly-parsed message is received.
    */
-  virtual void onRequest(const int16_t api_key) PURE;
+  virtual void onRequest(const int16_t api_key, const NullableString& client_id) PURE;
 
   /**
    * Invoked when an unknown message is received.
@@ -70,14 +76,47 @@ class RichRequestMetricsImpl: public RichRequestMetrics {
 public:
   RichRequestMetricsImpl(Stats::Scope& scope, std::string stat_prefix): metrics_({
     KAFKA_REQUEST_METRICS(POOL_COUNTER_PREFIX(scope, fmt::format("kafka.{}.request.",
-      stat_prefix)))}) {};
+      stat_prefix)))}),
+      scope_(scope),
+      stat_name_set_(scope.symbolTable().makeSet("Kafka")),
+      stat_prefix_(stat_prefix) {
+    // TODO(amre): make two following parameters configurable
+    all_tagged_metrics_sample_rate_ = 100;
+    // instead of regex we could also simply check the prefix of a client id
+    // but the regex is far more flexible.
+    // This regex matches metrics *not* starting with "metadata-proxy."
+    regex_ = Regex::Utility::parseStdRegexAsCompiledMatcher("^(?!(metadata-proxy\\.)).+?$");
+  };
 
-  void onRequest(const int16_t api_key) override {
+  void onRequest(const int16_t api_key, const NullableString& client_id) override {
     // Both successful message parsing & metrics list depend on protocol-generated code, what means
     // both do support the same api keys.
+    std::string non_null_client_id = client_id ? *client_id : "unknown";
     switch (api_key) {
     {% for message_type in message_types %}
     case {{ message_type.get_extra('api_key') }} :
+      // based on the configured rate (probabilistically)
+      if (random_.random() % 100 <= all_tagged_metrics_sample_rate_) {
+        scope_.counterFromStatName(stat_name_set_->add(
+            absl::StrCat(
+              fmt::format("kafka.{}.request.", stat_prefix_),
+              "request_type.{{ message_type.name_in_c_case() }}.",
+              fmt::format("client_id.{}", non_null_client_id)
+            )
+          )
+        ).inc();
+      }
+      // special metric for client ids that matches the regex (e.g., not from metadata proxy)
+      if (regex_ && regex_ -> match(non_null_client_id)) {
+        scope_.counterFromStatName(stat_name_set_->add(
+            absl::StrCat(
+              fmt::format("kafka.{}.request.alert.", stat_prefix_),
+              "request_type.{{ message_type.name_in_c_case() }}.",
+              fmt::format("client_id.{}", non_null_client_id)
+            )
+          )
+        ).inc();
+      }
       metrics_.{{ message_type.name_in_c_case() }}_.inc();
       return;
     {% endfor %}
@@ -90,6 +129,12 @@ public:
 
 private:
   KafkaRequestMetrics metrics_;
+  Stats::Scope& scope_;
+  Stats::StatNameSetPtr stat_name_set_;
+  std::string stat_prefix_;
+  Runtime::RandomGeneratorImpl random_;
+  unsigned long all_tagged_metrics_sample_rate_;
+  Regex::CompiledMatcherPtr regex_;
 };
 
 } // namespace Kafka
