@@ -85,7 +85,7 @@ public:
     // instead of regex we could also simply check the prefix of a client id
     // but the regex is far more flexible.
     // This regex matches metrics *not* starting with "metadata-proxy." or "metadata-proxy"
-    regex_ = Regex::Utility::parseStdRegexAsCompiledMatcher("^(?!(metadata-proxy(\\.|$)))");
+    regex_ = Regex::Utility::parseStdRegexAsCompiledMatcher("^(?!(metadata-proxy))");
   };
 
   void onRequest(const int16_t api_key, const NullableString& client_id) override {
