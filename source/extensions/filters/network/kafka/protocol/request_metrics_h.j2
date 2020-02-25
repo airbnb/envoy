@@ -37,7 +37,8 @@ namespace Kafka {
   COUNTER({{ message_type.name_in_c_case() }})                                                     \
 {% endfor %}                                                                                       \
   COUNTER(unknown)                                                                                 \
-  COUNTER(failure)
+  COUNTER(failure)                                                                                 \
+  COUNTER(alert)
 
 struct KafkaRequestMetrics {
   KAFKA_REQUEST_METRICS(GENERATE_COUNTER_STRUCT)
@@ -79,13 +80,17 @@ public:
       stat_prefix)))}),
       scope_(scope),
       stat_name_set_(scope.symbolTable().makeSet("Kafka")),
-      stat_prefix_(stat_prefix) {
+      stat_prefix_(stat_prefix),
+      api_calls_((1 << 3) | (1 << 6) | (1 << 10) | (1 << 18)) {
     // TODO(amre): make two following parameters configurable
-    all_tagged_metrics_sample_rate_ = 5;
+    all_tagged_metrics_sample_rate_ = 0;
     // instead of regex we could also simply check the prefix of a client id
     // but the regex is far more flexible.
     // This regex matches metrics *not* starting with "metadata-proxy." or "metadata-proxy"
     regex_ = Regex::Utility::parseStdRegexAsCompiledMatcher("^(?!(metadata-proxy))");
+
+    // a bitmask to check for calls to create metrics for
+    // 3 - metadata; 6 - update-metadata; 10 - find-coordinator; 18 - api-versions
   };
 
   void onRequest(const int16_t api_key, const NullableString& client_id) override {
@@ -96,7 +101,7 @@ public:
     {% for message_type in message_types %}
     case {{ message_type.get_extra('api_key') }} :
       // based on the configured rate (probabilistically)
-      if (random_.random() % 100 <= all_tagged_metrics_sample_rate_) {
+      if (all_tagged_metrics_sample_rate_ > 0 && random_.random() % 100 <= all_tagged_metrics_sample_rate_) {
         scope_.counterFromStatName(stat_name_set_->add(
             absl::StrCat(
               fmt::format("kafka.{}.request.", stat_prefix_),
@@ -107,7 +112,8 @@ public:
         ).inc();
       }
       // special metric for client ids that matches the regex (e.g., not from metadata proxy)
-      if (regex_ && regex_ -> match(non_null_client_id)) {
+      // and are one of the API calls we are interested in
+      if (((1 << api_key) & api_calls_) && regex_ && regex_ -> match(non_null_client_id)) {
         scope_.counterFromStatName(stat_name_set_->add(
             absl::StrCat(
               fmt::format("kafka.{}.request.alert.", stat_prefix_),
@@ -135,6 +141,7 @@ private:
   Runtime::RandomGeneratorImpl random_;
   unsigned long all_tagged_metrics_sample_rate_;
   Regex::CompiledMatcherPtr regex_;
+  const unsigned api_calls_;
 };
 
 } // namespace Kafka
