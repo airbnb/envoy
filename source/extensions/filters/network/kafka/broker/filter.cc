@@ -1,4 +1,5 @@
 #include "extensions/filters/network/kafka/broker/filter.h"
+#include "extensions/filters/network/kafka/kafka_types.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -32,7 +33,7 @@ KafkaMetricsFacadeImpl::KafkaMetricsFacadeImpl(TimeSource& time_source,
 // When request is successfully parsed, increase type count and store its arrival timestamp.
 void KafkaMetricsFacadeImpl::onMessage(AbstractRequestSharedPtr request) {
   const RequestHeader& header = request->request_header_;
-  request_metrics_->onRequest(header.api_key_);
+  request_metrics_->onRequest(header.api_key_, header.client_id_);
 
   const MonotonicTime request_arrival_ts = time_source_.monotonicTime();
   request_arrivals_[header.correlation_id_] = request_arrival_ts;

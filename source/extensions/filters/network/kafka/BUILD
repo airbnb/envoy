@@ -259,5 +259,7 @@ envoy_cc_library(
     external_deps = ["abseil_optional"],
     deps = [
         "//source/common/common:macros",
+        "//source/common/runtime:runtime_lib",
+        "//source/common/stats:symbol_table_lib",
     ],
 )
